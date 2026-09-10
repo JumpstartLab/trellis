@@ -1,5 +1,12 @@
 name: test
-on: [push, pull_request]
+# A same-repo branch used to fire this twice — once as `push`, once as
+# `pull_request` — so every context, `ci` included, was reported twice for the
+# one commit. A required status check reported twice is ambiguous; scope the
+# push trigger to the default branch, as the rest of the fleet does.
+on:
+  push:
+    branches: [main]
+  pull_request:
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -10,3 +17,35 @@ jobs:
           ruby-version: "3.3"
           bundler-cache: true
       - run: bundle exec ruby -Ilib -Itest test/trellis_test.rb
+
+  # The single status context the branch ruleset requires. The job key IS the
+  # context name, so do not rename it.
+  #
+  # It carries no `paths:` filter and no `if:` of its own, so it always runs and
+  # therefore always reports. That is the whole point: a required context that
+  # can be skipped leaves its PR pending forever, with no timeout.
+  #
+  # `if: always()` runs it even when a need failed or the run was cancelled —
+  # otherwise the gate would itself be skipped and report nothing. The step
+  # decides the verdict: a SKIPPED need is success (a path-filtered or
+  # conditional job that correctly did not run is not a failure), while FAILURE
+  # and CANCELLED are not.
+  ci:
+    if: always()
+    needs: [ test ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every gated job succeeded or was skipped
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          echo "$NEEDS" | jq -r 'to_entries[] | "  \(.key): \(.value.result)"'
+          bad=$(echo "$NEEDS" | jq -r 'to_entries[]
+                  | select(.value.result != "success" and .value.result != "skipped")
+                  | .key')
+          if [ -n "$bad" ]; then
+            echo "::error::CI gate failed. Not successful or skipped:" $bad
+            exit 1
+          fi
+          echo "CI gate passed."
