@@ -1,0 +1,60 @@
+name: Auto-merge
+
+# The `automerge` label is the interface and it has not changed: label a PR and
+# it merges when CI is green. What changed is everything underneath.
+#
+# This turns on GitHub's native auto-merge and gets out of the way. GitHub holds
+# the merge until the branch ruleset's required `ci` context reports green, then
+# squashes. There is no polling, no CI-result inspection and no waiting job,
+# because there is no longer anything to wait for here — the ruleset is the gate.
+#
+# The previous version of this workflow did all of that by hand, correctly, for
+# a constraint that no longer exists: the org was on the free plan, where private
+# repos get no branch protection. It moved to Team on 2026-09-10.
+on:
+  pull_request:
+    types: [labeled, opened, reopened, synchronize]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  automerge:
+    if: contains(github.event.pull_request.labels.*.name, 'automerge')
+    runs-on: ubuntu-latest
+    steps:
+      # Enabling auto-merge on a PR with no required checks does not wait — it
+      # merges immediately. So an ungated repo is not a harmless no-op here, it
+      # is a merge that CI never saw. Fail loudly instead.
+      - name: Refuse to queue a merge nothing will gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BASE: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          gated=$(gh api "repos/$REPO/rules/branches/$BASE" \
+            --jq '[ .[] | select(.type == "required_status_checks")
+                    | .parameters.required_status_checks[].context ]
+                  | index("ci") != null')
+          if [ "$gated" != "true" ]; then
+            echo "::error::$BASE on $REPO does not require the 'ci' status check, so"
+            echo "auto-merge would merge this PR without waiting for CI. Refusing."
+            echo "Fix the ruleset, or drop the automerge label and merge by hand."
+            exit 1
+          fi
+          echo "'ci' is required on $BASE — safe to queue."
+
+      # AUTOMERGE_PAT where it exists: a merge attributed to GITHUB_TOKEN does
+      # not trigger the downstream deploy workflow (GitHub's recursion guard).
+      # Repos with no deploy job do not set the secret and fall back cleanly.
+      - name: Queue the merge
+        env:
+          GH_TOKEN: ${{ secrets.AUTOMERGE_PAT || github.token }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh pr merge "$NUMBER" --repo "$REPO" --auto --squash --delete-branch
+          echo "Auto-merge enabled on #$NUMBER; GitHub will land it when 'ci' is green."
