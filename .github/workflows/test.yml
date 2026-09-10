@@ -1,5 +1,12 @@
 name: test
-on: [push, pull_request]
+# A same-repo branch used to fire this twice — once as `push`, once as
+# `pull_request` — so every context, `ci` included, was reported twice for the
+# one commit. A required status check reported twice is ambiguous; scope the
+# push trigger to the default branch, as the rest of the fleet does.
+on:
+  push:
+    branches: [main]
+  pull_request:
 jobs:
   test:
     runs-on: ubuntu-latest
