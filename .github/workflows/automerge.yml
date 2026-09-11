@@ -23,6 +23,11 @@ jobs:
   automerge:
     if: contains(github.event.pull_request.labels.*.name, 'automerge')
     runs-on: ubuntu-latest
+    # Resolved here rather than in a step `if:` — the secrets context is
+    # reliably available to job-level env, and this is the shape the workflow
+    # this replaced already used.
+    env:
+      HAS_PAT: ${{ secrets.AUTOMERGE_PAT != '' }}
     steps:
       # Enabling auto-merge on a PR with no required checks does not wait — it
       # merges immediately. So an ungated repo is not a harmless no-op here, it
@@ -46,9 +51,12 @@ jobs:
           fi
           echo "'ci' is required on $BASE — safe to queue."
 
-      # AUTOMERGE_PAT where it exists: a merge attributed to GITHUB_TOKEN does
-      # not trigger the downstream deploy workflow (GitHub's recursion guard).
-      # Repos with no deploy job do not set the secret and fall back cleanly.
+      # AUTOMERGE_PAT matters more than it looks. GitHub deliberately does not
+      # trigger workflows from a push made with GITHUB_TOKEN (the anti-recursion
+      # rule), and native auto-merge performs the merge as whoever ENABLED it.
+      # Enable it as github-actions[bot] and the merge commit lands on the
+      # default branch having triggered nothing at all — no deploy, and no CI on
+      # the default branch either.
       - name: Queue the merge
         env:
           GH_TOKEN: ${{ secrets.AUTOMERGE_PAT || github.token }}
@@ -58,3 +66,31 @@ jobs:
           set -euo pipefail
           gh pr merge "$NUMBER" --repo "$REPO" --auto --squash --delete-branch
           echo "Auto-merge enabled on #$NUMBER; GitHub will land it when 'ci' is green."
+
+      # Deliberately AFTER the merge is queued, and deliberately fatal.
+      #
+      # Without a PAT the merge still happens and is still gated on CI, so
+      # blocking it would cost more than it saves. What is lost is everything
+      # the merge push should have triggered — which fails silently: CI is green,
+      # the PR merges, every dashboard agrees, and production simply stops
+      # changing. Frontier lost 18 merges and four and a half hours to exactly
+      # this on 2026-09-10.
+      #
+      # A red check here is the only thing standing between that and nobody
+      # noticing. If this repo genuinely has nothing that runs on a push to its
+      # default branch, the fix is still to set the secret rather than to make
+      # this conditional — one invariant, no per-repo exceptions to remember.
+      - name: A bot merge triggers nothing downstream
+        if: env.HAS_PAT != 'true'
+        run: |
+          echo "::error::AUTOMERGE_PAT is not set on ${{ github.repository }}."
+          echo ""
+          echo "This PR will merge, gated on CI as normal. But the merge will be"
+          echo "attributed to github-actions[bot], and GitHub does not trigger"
+          echo "workflows from a GITHUB_TOKEN push. So nothing will run on the"
+          echo "resulting push to the default branch — including any deploy."
+          echo ""
+          echo "Fix: set an AUTOMERGE_PAT secret (org-level covers every repo at"
+          echo "once). Until then, dispatch the deploy by hand after this merges:"
+          echo "  gh workflow run deploy.yml --repo ${{ github.repository }}"
+          exit 1
